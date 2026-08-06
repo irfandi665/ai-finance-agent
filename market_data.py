@@ -1,8 +1,8 @@
 # market_data.py
 
 """
-Modul untuk menarik data pasar saham (indeks) menggunakan yfinance.
-Bertanggung jawab tunggal: mengambil & memformat data harga indeks.
+Modul untuk menarik data pasar (indeks & saham individual) menggunakan
+yfinance. Bertanggung jawab tunggal: mengambil & memformat data harga.
 Tidak menangani analisis atau pengiriman pesan (Single Responsibility).
 """
 
@@ -12,29 +12,35 @@ from typing import List, Optional
 
 import yfinance as yf
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
-# Daftar indeks yang dipantau. Menambah/mengurangi indeks cukup dengan
-# mengubah dictionary ini, tanpa menyentuh logika pengambilan data
-# (Open/Closed Principle).
-MONITORED_INDICES = {
-    "^JKSE": "IHSG (Indonesia)",
-    "^DJI": "Dow Jones (AS)",
-    "^GSPC": "S&P 500 (AS)",
-    "^IXIC": "Nasdaq Composite (AS)",
+# Daftar instrumen yang dipantau, dikelompokkan per kategori. Menambah
+# saham baru cukup tambahkan baris di kategori "Saham" — tidak perlu
+# menyentuh logika pengambilan data sama sekali (Open/Closed Principle).
+MONITORED_INSTRUMENTS = {
+    "Indeks": {
+        "^JKSE": "IHSG (Indonesia)",
+        "^DJI": "Dow Jones (AS)",
+        "^GSPC": "S&P 500 (AS)",
+        "^IXIC": "Nasdaq Composite (AS)",
+    },
+    "Saham": {
+        "BBCA.JK": "Bank Central Asia",
+        "BBRI.JK": "Bank Rakyat Indonesia",
+        "TLKM.JK": "Telkom Indonesia",
+        "AAPL": "Apple Inc.",
+    },
 }
 
 
 @dataclass
 class IndexData:
-    """Representasi data satu indeks pasar pada satu titik waktu."""
+    """Representasi data satu instrumen (indeks atau saham) pada satu titik waktu."""
     ticker: str
     name: str
+    category: str
     last_close: float
     previous_close: float
     change_value: float
@@ -50,16 +56,13 @@ class IndexData:
         return "⚪"
 
 
-def get_index_data(ticker: str, name: Optional[str] = None) -> Optional[IndexData]:
+def get_index_data(
+    ticker: str, name: Optional[str] = None, category: str = "Indeks"
+) -> Optional[IndexData]:
     """
     Mengambil harga penutupan terakhir, penutupan sebelumnya, perubahan
-    (nilai & persen), dan volume untuk satu ticker.
-
-    Menggunakan history 5 hari terakhir agar tetap tersedia minimal 2 baris
-    data valid meski ada hari libur bursa.
-
-    Returns:
-        IndexData jika berhasil, None jika data tidak tersedia/gagal diambil.
+    (nilai & persen), dan volume untuk satu ticker (indeks maupun saham
+    individual — yfinance memperlakukan keduanya dengan API yang sama).
     """
     display_name = name or ticker
 
@@ -89,6 +92,7 @@ def get_index_data(ticker: str, name: Optional[str] = None) -> Optional[IndexDat
         return IndexData(
             ticker=ticker,
             name=display_name,
+            category=category,
             last_close=round(last_close, 2),
             previous_close=round(previous_close, 2),
             change_value=round(change_value, 2),
@@ -103,21 +107,24 @@ def get_index_data(ticker: str, name: Optional[str] = None) -> Optional[IndexDat
 
 def get_all_market_data() -> List[IndexData]:
     """
-    Mengambil data seluruh indeks di MONITORED_INDICES. Kegagalan pada satu
-    ticker tidak menghentikan pengambilan ticker lain (fault isolation) —
-    penting karena skrip ini berjalan otomatis tanpa pengawasan manusia.
+    Mengambil data seluruh instrumen di MONITORED_INSTRUMENTS (indeks +
+    saham). Kegagalan pada satu ticker tidak menghentikan pengambilan
+    ticker lain (fault isolation) — penting karena semakin banyak
+    instrumen dipantau, semakin besar kemungkinan satu-dua di antaranya
+    gagal diambil pada hari tertentu.
 
     Returns:
         List[IndexData] — hanya berisi ticker yang berhasil diambil.
     """
     results: List[IndexData] = []
 
-    for ticker, name in MONITORED_INDICES.items():
-        data = get_index_data(ticker, name)
-        if data is not None:
-            results.append(data)
-        else:
-            logger.warning(f"{name} ({ticker}) dilewati karena data tidak tersedia.")
+    for category, tickers in MONITORED_INSTRUMENTS.items():
+        for ticker, name in tickers.items():
+            data = get_index_data(ticker, name, category=category)
+            if data is not None:
+                results.append(data)
+            else:
+                logger.warning(f"{name} ({ticker}) dilewati karena data tidak tersedia.")
 
     if not results:
         logger.error("Tidak ada data pasar yang berhasil diambil sama sekali.")
@@ -127,30 +134,35 @@ def get_all_market_data() -> List[IndexData]:
 
 def format_market_summary(index_list: List[IndexData]) -> str:
     """
-    Memformat list IndexData menjadi teks ringkas siap pakai sebagai
-    konteks prompt Gemini AI maupun tampilan di Telegram.
+    Memformat list IndexData menjadi teks ringkas, dikelompokkan per
+    kategori (Indeks/Saham), siap dipakai sebagai konteks prompt Gemini
+    AI maupun tampilan di Telegram.
     """
     if not index_list:
         return "Data pasar tidak tersedia saat ini."
 
-    lines = []
+    grouped: dict = {}
     for data in index_list:
-        sign_value = "+" if data.change_value >= 0 else ""
-        sign_pct = "+" if data.change_percent >= 0 else ""
-        lines.append(
-            f"{data.trend_emoji} {data.name} ({data.ticker}): "
-            f"{data.last_close:,.2f} "
-            f"({sign_value}{data.change_value:,.2f} / {sign_pct}{data.change_percent:.2f}%) "
-            f"| Volume: {data.volume:,}"
-        )
+        grouped.setdefault(data.category, []).append(data)
 
-    return "\n".join(lines)
+    lines = []
+    for category, items in grouped.items():
+        lines.append(f"\n--- {category} ---")
+        for data in items:
+            sign_value = "+" if data.change_value >= 0 else ""
+            sign_pct = "+" if data.change_percent >= 0 else ""
+            lines.append(
+                f"{data.trend_emoji} {data.name} ({data.ticker}): "
+                f"{data.last_close:,.2f} "
+                f"({sign_value}{data.change_value:,.2f} / {sign_pct}{data.change_percent:.2f}%) "
+                f"| Volume: {data.volume:,}"
+            )
+
+    return "\n".join(lines).strip()
 
 
 if __name__ == "__main__":
-    # Self-test: jalankan `python market_data.py` untuk memverifikasi
-    # koneksi yfinance sebelum diintegrasikan ke Gemini.
-    print("Mengambil data pasar...\n")
+    print("Mengambil data pasar (indeks & saham)...\n")
     market_data = get_all_market_data()
 
     if market_data:

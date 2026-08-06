@@ -4,3 +4,6 @@ venv/
 __pycache__/
 *.pyc
 .DS_Store
+# .gitignore (tambahan opsional — HANYA jika deployment Anda 100% lokal via systemd)
+report_history.db
+report_history_export.csv

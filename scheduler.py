@@ -1,14 +1,9 @@
 # scheduler.py
 
 """
-Scheduler untuk menjalankan main.py setiap hari jam 07:00 (waktu lokal
-server) secara berulang. Cocok dijalankan sebagai proses long-running
-di WSL/Linux.
-
-CATATAN PENTING: Library `schedule` menggunakan timezone LOKAL SERVER,
-bukan timezone eksplisit. Pastikan timezone server sudah diset ke
-Asia/Jakarta (lihat Langkah 2.1), atau sesuaikan SCHEDULE_TIME secara
-manual jika server berjalan di timezone lain (misal UTC).
+Scheduler untuk menjalankan main.py setiap hari jam 07:00, DAN mengirim
+heartbeat mingguan setiap Senin jam 08:00 (waktu lokal server — pastikan
+timezone server sudah WIB, lihat Fase 3 Langkah 2.1).
 """
 
 import logging
@@ -17,32 +12,38 @@ import time
 import schedule
 
 from main import run_daily_report
+from heartbeat import send_heartbeat
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-SCHEDULE_TIME = "07:00"  # Waktu lokal server — pastikan server sudah WIB
+DAILY_REPORT_TIME = "07:00"
+HEARTBEAT_TIME = "08:00"
 
 
-def job() -> None:
-    logger.info(f"Menjalankan job terjadwal pada {SCHEDULE_TIME}...")
+def daily_job() -> None:
+    logger.info(f"Menjalankan laporan harian terjadwal pada {DAILY_REPORT_TIME}...")
     try:
         run_daily_report()
     except Exception as exc:
-        # Safety net terakhir: apa pun yang lolos dari penanganan error
-        # di main.py tidak boleh membuat proses scheduler ini mati,
-        # karena scheduler harus tetap hidup untuk job besok.
-        logger.critical(f"Job gagal dengan error tak terduga: {exc}")
+        logger.critical(f"Job laporan harian gagal dengan error tak terduga: {exc}")
+
+
+def heartbeat_job() -> None:
+    logger.info("Menjalankan heartbeat mingguan...")
+    try:
+        send_heartbeat()
+    except Exception as exc:
+        logger.critical(f"Job heartbeat gagal dengan error tak terduga: {exc}")
 
 
 def start_scheduler() -> None:
-    schedule.every().day.at(SCHEDULE_TIME).do(job)
+    schedule.every().day.at(DAILY_REPORT_TIME).do(daily_job)
+    schedule.every().monday.at(HEARTBEAT_TIME).do(heartbeat_job)
+
     logger.info(
-        f"Scheduler aktif. Laporan akan dikirim setiap hari jam "
-        f"{SCHEDULE_TIME} (waktu lokal server)."
+        f"Scheduler aktif. Laporan harian: {DAILY_REPORT_TIME}, "
+        f"Heartbeat mingguan: Senin {HEARTBEAT_TIME} (waktu lokal server)."
     )
 
     while True:
