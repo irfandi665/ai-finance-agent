@@ -1,0 +1,35 @@
+2026-08-06 17:03:24,144 [INFO] __main__ - Bot interaktif AI Finance Agent mulai berjalan (polling mode)...
+2026-08-06 17:03:41,925 [INFO] __main__ - User 1241528320 memulai sesi via /start.
+2026-08-06 17:04:04,264 [INFO] __main__ - Pesan masuk dari user 1241528320: analisis fundamental saham BBCA
+2026-08-06 17:04:05,119 [INFO] google_genai.models - AFC is enabled with max remote calls: 10.
+2026-08-06 17:04:05,585 [ERROR] __main__ - Gemini API error saat memproses chat: 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'Request contains an invalid argument.', 'status': 'INVALID_ARGUMENT'}}
+2026-08-06 17:04:05,586 [ERROR] __main__ - Gagal mendapatkan respons Gemini untuk user 1241528320: Gemini API error: 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'Request contains an invalid argument.', 'status': 'INVALID_ARGUMENT'}}
+2026-08-06 17:04:43,016 [INFO] __main__ - Bot interaktif AI Finance Agent mulai berjalan (polling mode)...
+2026-08-06 17:04:48,647 [INFO] __main__ - User 1241528320 memulai sesi via /start.
+2026-08-06 17:04:54,194 [INFO] __main__ - Pesan masuk dari user 1241528320: hallo
+2026-08-06 17:04:54,916 [INFO] google_genai.models - AFC is enabled with max remote calls: 10.
+2026-08-06 17:04:56,410 [INFO] __main__ - Balasan berhasil dikirim ke user 1241528320.
+2026-08-06 17:05:02,072 [INFO] __main__ - Pesan masuk dari user 1241528320: analisis fundamental saham BBCA
+2026-08-06 17:05:02,774 [INFO] google_genai.models - AFC is enabled with max remote calls: 10.
+2026-08-06 17:05:05,561 [INFO] __main__ - Balasan berhasil dikirim ke user 1241528320.
+2026-08-06 17:05:53,343 [INFO] __main__ - Pesan masuk dari user 1241528320: sekarang apakah waktu yang tepat untuk membeli BBCA?
+2026-08-06 17:05:54,057 [INFO] google_genai.models - AFC is enabled with max remote calls: 10.
+2026-08-06 17:05:57,975 [INFO] __main__ - Balasan berhasil dikirim ke user 1241528320.
+2026-08-06 17:06:47,543 [INFO] __main__ - Pesan masuk dari user 1241528320: saya ada modal 1 juta, ingin jadi 100 juta, caranya gimana?
+2026-08-06 17:06:48,343 [INFO] google_genai.models - AFC is enabled with max remote calls: 10.
+2026-08-06 17:06:53,071 [INFO] __main__ - Balasan berhasil dikirim ke user 1241528320.
+2026-08-06 17:08:20,613 [INFO] __main__ - Pesan masuk dari user 1241528320: berapa harga btc sekarang?
+2026-08-06 17:08:21,326 [INFO] google_genai.models - AFC is enabled with max remote calls: 10.
+2026-08-06 17:08:23,763 [INFO] __main__ - Balasan berhasil dikirim ke user 1241528320.
+2026-08-06 17:11:07,173 [INFO] __main__ - Bot interaktif AI Finance Agent (dengan memori) mulai berjalan (polling mode)...
+2026-08-06 17:11:21,778 [INFO] __main__ - User 1241528320 memulai sesi via /start.
+2026-08-06 17:11:29,549 [INFO] __main__ - Pesan masuk dari user 1241528320: berapa harga bbca sekarang?
+2026-08-06 17:11:30,270 [INFO] google_genai.models - AFC is enabled with max remote calls: 10.
+2026-08-06 17:11:30,730 [ERROR] __main__ - Gemini API error saat memproses chat: 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'Request contains an invalid argument.', 'status': 'INVALID_ARGUMENT'}}
+2026-08-06 17:11:30,730 [ERROR] __main__ - Gagal mendapatkan respons Gemini untuk user 1241528320: Gemini API error: 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'Request contains an invalid argument.', 'status': 'INVALID_ARGUMENT'}}
+2026-08-06 17:11:52,408 [INFO] __main__ - Bot interaktif AI Finance Agent (dengan memori) mulai berjalan (polling mode)...
+2026-08-06 17:12:02,781 [INFO] __main__ - User 1241528320 memulai sesi via /start.
+2026-08-06 17:12:06,261 [INFO] __main__ - Pesan masuk dari user 1241528320: berapa harga bbca sekarang?
+2026-08-06 17:12:06,617 [INFO] google_genai.models - AFC is enabled with max remote calls: 10.
+2026-08-06 17:12:11,043 [INFO] __main__ - Balasan berhasil dikirim ke user 1241528320 (riwayat: 1 turn).
+2026-08-06 17:21:16,843 [INFO] __main__ - Bot interaktif AI Finance Agent (dengan memori) mulai berjalan (polling mode)...
