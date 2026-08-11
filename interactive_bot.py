@@ -3,13 +3,14 @@
 """
 Bot Telegram interaktif untuk AI Finance Department Agent, dengan:
 1. MEMORI PERCAKAPAN per chat_id
-2. AKSES DATA PASAR REAL-TIME via Function Calling manual
-3. DYNAMIC MODEL SWITCHER — perintah /model menampilkan 8 pilihan model
-   Gemini via InlineKeyboardMarkup, preferensi disimpan per user_id
-4. RATE-LIMIT FALLBACK OTOMATIS — reaktif (429) & proaktif (tracking lokal)
-5. PROFESSIONAL HTML FORMATTING — output Gemini diformat sebagai laporan
-   rapi (heading, bullet, bold, divider) via ParseMode.HTML, dengan
-   sanitasi tag untuk mencegah crash saat parsing di sisi Telegram.
+2. AKSES DATA PASAR REAL-TIME (harga) via Function Calling manual
+3. ANALISIS TEKNIKAL REAL-TIME (SMA/EMA/RSI/MACD/Bollinger) via tool
+   get_technical_analysis (technical_analysis.py)
+4. ANALISIS GAMBAR & DOKUMEN — user bisa kirim screenshot chart (analisis
+   teknikal visual + konfirmasi angka riil) atau PDF laporan keuangan
+   (analisis fundamental)
+5. DYNAMIC MODEL SWITCHER via /model (tombol) + rate-limit fallback otomatis
+6. PROFESSIONAL HTML FORMATTING dengan sanitasi anti-crash
 
 Arsitektur: python-telegram-bot v20+ (async, ApplicationBuilder).
 
@@ -23,9 +24,10 @@ import re
 import sys
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
@@ -45,6 +47,7 @@ from google.genai import errors as genai_errors
 
 from config import Config, ConfigError
 from market_data import get_index_data
+from technical_analysis import get_technical_analysis
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -61,32 +64,30 @@ logger = logging.getLogger(__name__)
 
 
 # --- Konfigurasi Umum ---
-GEMINI_MAX_OUTPUT_TOKENS = 1024
+GEMINI_MAX_OUTPUT_TOKENS = 3072  # naik dari 1536 — provenance + rumus + daily & weekly + completeness check butuh ruang lebih
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 MAX_HISTORY_TURNS = 10
-MAX_FUNCTION_CALL_ROUNDS = 3
+MAX_FUNCTION_CALL_ROUNDS = 4     # naik dari 3 — mengakomodasi pemanggilan daily + weekly + harga sekaligus
 RATE_LIMIT_COOLDOWN_SECONDS = 60
+
+# Batas ukuran file yang diterima — sedikit di bawah limit download bot
+# Telegram (20MB) untuk memberi headroom, dan tetap aman untuk inline
+# request Gemini (bukan File API).
+MAX_MEDIA_FILE_BYTES = 15 * 1024 * 1024
+ALLOWED_DOCUMENT_MIME_TYPES = {"application/pdf", "image/png", "image/jpeg", "image/webp"}
 
 
 @dataclass
 class ModelOption:
-    """
-    Definisi satu model Gemini: id resmi, label tampilan, dan limit lokal
-    (rpm/rpd). SATU sumber kebenaran dipakai baik untuk tombol /model
-    maupun tracking rate-limit ModelManager — mencegah duplikasi data
-    yang bisa tidak sinkron.
-    """
     id: str
     label: str
     rpm_limit: int
     rpd_limit: int
 
 
-# ⚠️ PENTING: daftar & angka limit di bawah adalah PERKIRAAN per Agustus
-# 2026 berdasarkan dokumentasi publik Google. VERIFIKASI ULANG ketersediaan
-# model di https://ai.google.dev/gemini-api/docs/models dan limit RPM/RPD
-# akun Anda di https://aistudio.google.com/app/apikey — keduanya bisa
-# berubah tanpa pemberitahuan. Model *-pro mungkin butuh billing aktif.
+# ⚠️ PENTING: verifikasi ulang ketersediaan model di
+# https://ai.google.dev/gemini-api/docs/models dan limit RPM/RPD akun
+# Anda di https://aistudio.google.com/app/apikey.
 AVAILABLE_MODELS: List[ModelOption] = [
     ModelOption(id="gemini-3.6-flash", label="Gemini 3.6 Flash", rpm_limit=10, rpd_limit=250),
     ModelOption(id="gemini-3.5-flash", label="Gemini 3.5 Flash", rpm_limit=10, rpd_limit=250),
@@ -108,15 +109,22 @@ GAYA KOMUNIKASI:
 - Gunakan istilah keuangan yang tepat, jelaskan singkat jika teknis.
 
 AKSES DATA PASAR REAL-TIME:
-- Anda punya akses ke fungsi get_stock_price untuk data harga TERKINI dari Yahoo Finance.
-- WAJIB panggil fungsi ini setiap kali klien menanyakan harga/performa suatu saham/indeks — JANGAN pernah menjawab dari ingatan/asumsi.
-- Jika fungsi error, sampaikan jujur, jangan mengarang angka.
+- Gunakan get_stock_price untuk harga TERKINI (harga, perubahan, volume) dari Yahoo Finance.
+- WAJIB panggil setiap kali klien menanyakan harga/performa suatu saham/indeks — JANGAN pernah menjawab dari ingatan/asumsi.
+
+ANALISIS TEKNIKAL BERBASIS DATA REAL:
+- Gunakan get_technical_analysis untuk mendapatkan SMA, EMA, RSI, MACD, Bollinger Bands, dan support/resistance 3 bulan yang DIHITUNG dari data historis sungguhan.
+- WAJIB panggil fungsi ini setiap kali diminta analisis teknikal, sinyal beli/jual berbasis indikator, atau menyebut istilah seperti RSI/MACD/support/resistance untuk suatu ticker. JANGAN PERNAH mengarang nilai indikator dari ingatan.
+
+ANALISIS GAMBAR & DOKUMEN:
+- Jika user mengirim GAMBAR (misal screenshot chart candlestick): lakukan analisis teknikal VISUAL (identifikasi pola chart seperti head-and-shoulders/double top-bottom, arah tren, level support/resistance yang terlihat di gambar). Jika ada ticker/nama saham yang disebutkan di caption atau terlihat di gambar, WAJIB panggil get_technical_analysis untuk MENGONFIRMASI dengan angka riil — jangan hanya mengandalkan interpretasi visual untuk angka presisi seperti RSI.
+- Jika user mengirim DOKUMEN (misal laporan keuangan PDF): lakukan analisis FUNDAMENTAL berdasarkan isi dokumen tersebut — ekstrak metrik penting (pendapatan, laba bersih, margin, rasio utang, pertumbuhan YoY) yang BENAR-BENAR TERTULIS di dokumen. Jangan mengarang angka yang tidak ada di dalamnya.
 
 FORMAT OUTPUT (SANGAT PENTING — WAJIB DIIKUTI):
-Gunakan HANYA tag HTML berikut yang didukung Telegram: <b>teks</b> (bold — untuk angka penting, harga, persentase, dan sub-judul), <i>teks</i> (italic — untuk catatan kecil), <u>teks</u> (underline — sesekali untuk penekanan), <code>teks</code> (untuk kode ticker, misal <code>BBCA.JK</code>).
+Gunakan HANYA tag HTML berikut yang didukung Telegram: <b>teks</b> (bold — untuk angka penting, harga, persentase, sub-judul), <i>teks</i> (italic — catatan kecil), <u>teks</u> (underline — penekanan khusus), <code>teks</code> (kode ticker, misal <code>BBCA.JK</code>).
 JANGAN PERNAH memakai tag lain seperti <div>, <table>, <h1>, <ul>, <li>, <p>, <br> — Telegram TIDAK mendukungnya dan pesan akan gagal terkirim.
 
-Untuk pertanyaan analitis (bukan basa-basi singkat), susun jawaban seperti laporan profesional:
+Untuk pertanyaan/analisis (bukan basa-basi singkat), susun seperti laporan profesional:
 
 📊 <b>[Judul Singkat Topik]</b>
 ──────────────────
@@ -125,7 +133,7 @@ Untuk pertanyaan analitis (bukan basa-basi singkat), susun jawaban seperti lapor
 <b>Poin Kunci:</b>
 - [poin 1, angka penting dalam <b>bold</b>]
 - [poin 2]
-- [poin 3, maksimal 4 poin]
+- [poin 3, maksimal 4-5 poin]
 ──────────────────
 
 Untuk sapaan/basa-basi singkat, jawab singkat tanpa struktur laporan ini.
@@ -147,13 +155,7 @@ class GeminiChatError(Exception):
 # ============================================================
 
 class ModelManager:
-    """
-    Melacak penggunaan (RPM/RPD) dan status rate-limit tiap model Gemini
-    secara GLOBAL, serta fallback reaktif saat API mengembalikan 429
-    sungguhan. Terpisah dari UserModelPreferenceStore (di bawah) yang
-    menyimpan PILIHAN model tiap user — Single Responsibility: satu
-    kelas urus rate-limit, satu kelas urus preferensi personal.
-    """
+    """Melacak penggunaan (RPM/RPD) dan status rate-limit tiap model Gemini secara global, serta fallback reaktif saat API mengembalikan 429."""
 
     def __init__(self, models: List[ModelOption]) -> None:
         if not models:
@@ -195,24 +197,16 @@ class ModelManager:
         return True
 
     def get_active_model(self, preferred: Optional[str] = None) -> str:
-        """
-        1. Jika user punya preferensi DAN model itu masih ada headroom lokal, pakai itu.
-        2. Jika tidak, pilih model pertama di AVAILABLE_MODELS yang masih ada headroom.
-        3. Jika semua kehabisan headroom, tetap coba model pertama sebagai usaha terakhir.
-        """
         if preferred:
             option = self._get_option(preferred)
             if option and self._has_headroom(option):
                 return option.id
-
         for option in self._models:
             if self._has_headroom(option):
                 return option.id
-
         return self._models[0].id
 
     def get_next_fallback(self, current_model: str) -> Optional[str]:
-        """Model SETELAH current_model di AVAILABLE_MODELS, atau None jika sudah yang terakhir."""
         ids = [m.id for m in self._models]
         try:
             idx = ids.index(current_model)
@@ -244,22 +238,14 @@ class ModelManager:
                 f"     RPM: {rpm_used}/{option.rpm_limit} | RPD: {rpd_used}/{option.rpd_limit}"
             )
         lines.append(
-            "\n<i>Catatan: angka limit adalah perkiraan lokal, bisa diubah "
-            "di kode. Cek limit sebenarnya di aistudio.google.com/app/apikey.</i>"
+            "\n<i>Catatan: angka limit adalah perkiraan lokal. Cek limit "
+            "sebenarnya di aistudio.google.com/app/apikey.</i>"
         )
         return "\n".join(lines)
 
 
-# ============================================================
-# STATE MANAGEMENT: Preferensi Model Per-User (untuk /model)
-# ============================================================
-
 class UserModelPreferenceStore:
-    """
-    Menyimpan preferensi model Gemini PER USER (state management
-    in-memory sederhana, di-keyed oleh user_id Telegram). Sama seperti
-    ChatHistoryManager, state ini RESET saat proses bot di-restart.
-    """
+    """Menyimpan preferensi model Gemini PER USER (in-memory, di-keyed oleh user_id)."""
 
     def __init__(self, default_model_id: str) -> None:
         self._default_model_id = default_model_id
@@ -295,7 +281,7 @@ class ChatHistoryManager:
 
 
 # ============================================================
-# HTML SANITIZATION (pertahanan anti-crash Telegram)
+# HTML SANITIZATION
 # ============================================================
 
 _ALLOWED_HTML_TAGS = {"b", "i", "u", "s", "code", "pre", "a"}
@@ -303,27 +289,19 @@ _HTML_TAG_PATTERN = re.compile(r"</?([a-zA-Z0-9]+)(\s+[^>]*)?>")
 
 
 def _sanitize_html_for_telegram(text: str) -> str:
-    """
-    LAPIS PERTAHANAN PERTAMA: meski system prompt sudah menginstruksikan
-    Gemini untuk HANYA memakai tag aman, LLM sesekali tetap bisa "lupa"
-    dan menghasilkan tag lain (misal <h1>, <li>, <div>). Fungsi ini
-    membuang tag APA PUN di luar whitelist, TANPA menghapus teks di
-    dalamnya — hanya tag pembungkusnya yang dibuang.
-    """
+    """Membuang tag HTML di luar whitelist, mempertahankan teks di dalamnya."""
     def _strip_disallowed(match) -> str:
         tag_name = match.group(1).lower()
         return match.group(0) if tag_name in _ALLOWED_HTML_TAGS else ""
-
     return _HTML_TAG_PATTERN.sub(_strip_disallowed, text)
 
 
 def _strip_all_html_tags(text: str) -> str:
-    """LAPIS PERTAHANAN KEDUA (fallback terakhir): buang SEMUA tag HTML — dipakai saat Telegram tetap menolak parsing meski sudah disanitasi (misal tag tidak tertutup dengan benar)."""
+    """Fallback terakhir: buang SEMUA tag HTML."""
     return _HTML_TAG_PATTERN.sub("", text)
 
 
 def _split_text(text: str, max_length: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> List[str]:
-    """Memecah teks panjang agar tidak melebihi batas 4096 karakter Telegram."""
     if len(text) <= max_length:
         return [text]
     chunks: List[str] = []
@@ -341,14 +319,9 @@ def _split_text(text: str, max_length: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> Lis
 
 
 async def _reply_safe(update: Update, text: str) -> None:
-    """
-    Mengirim balasan dengan tiga lapis perlindungan: (1) sanitasi tag
-    HTML tak dikenal, (2) split otomatis jika >4096 karakter, (3)
-    fallback ke teks polos jika Telegram TETAP menolak parsing.
-    """
+    """Sanitasi tag HTML tak dikenal → split otomatis → fallback teks polos jika Telegram tetap menolak."""
     sanitized = _sanitize_html_for_telegram(text)
     chunks = _split_text(sanitized)
-
     for chunk in chunks:
         try:
             await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
@@ -358,16 +331,15 @@ async def _reply_safe(update: Update, text: str) -> None:
 
 
 # ============================================================
-# TOOL: get_stock_price (data pasar real-time)
+# TOOLS: get_stock_price & get_technical_analysis
 # ============================================================
 
 GET_STOCK_PRICE_DECLARATION = types.FunctionDeclaration(
     name="get_stock_price",
     description=(
         "Mengambil data harga saham/indeks REAL-TIME (harga penutupan "
-        "terakhir, perubahan harian, dan volume) langsung dari Yahoo "
-        "Finance. WAJIB dipanggil setiap kali user menanyakan harga, "
-        "performa, atau kondisi terkini dari suatu saham atau indeks."
+        "terakhir, perubahan harian, volume) dari Yahoo Finance. WAJIB "
+        "dipanggil setiap kali user menanyakan harga/performa terkini."
     ),
     parameters_json_schema={
         "type": "object",
@@ -375,10 +347,9 @@ GET_STOCK_PRICE_DECLARATION = types.FunctionDeclaration(
             "ticker": {
                 "type": "string",
                 "description": (
-                    "Kode ticker Yahoo Finance. Untuk saham Indonesia, WAJIB "
-                    "tambahkan akhiran '.JK' (contoh: 'BBCA.JK'). Untuk "
-                    "indeks, gunakan awalan '^' (contoh: '^JKSE' untuk IHSG). "
-                    "Untuk saham Amerika, gunakan kode biasa (contoh: 'AAPL')."
+                    "Kode ticker Yahoo Finance. Saham Indonesia WAJIB akhiran "
+                    "'.JK' (contoh 'BBCA.JK'). Indeks pakai awalan '^' (contoh "
+                    "'^JKSE'). Saham AS pakai kode biasa (contoh 'AAPL')."
                 ),
             }
         },
@@ -386,17 +357,37 @@ GET_STOCK_PRICE_DECLARATION = types.FunctionDeclaration(
     },
 )
 
-MARKET_DATA_TOOL = types.Tool(function_declarations=[GET_STOCK_PRICE_DECLARATION])
+GET_TECHNICAL_ANALYSIS_DECLARATION = types.FunctionDeclaration(
+    name="get_technical_analysis",
+    description=(
+        "Menghitung indikator analisis TEKNIKAL REAL-TIME (SMA, EMA, RSI, "
+        "MACD, Bollinger Bands, support/resistance 3 bulan) dari data "
+        "historis saham/indeks. WAJIB dipanggil setiap kali user meminta "
+        "analisis teknikal atau sinyal beli/jual berbasis indikator — "
+        "jangan pernah mengarang nilai indikator."
+    ),
+    parameters_json_schema={
+        "type": "object",
+        "properties": {
+            "ticker": {
+                "type": "string",
+                "description": "Format ticker sama seperti get_stock_price (contoh 'BBCA.JK', '^JKSE', 'AAPL').",
+            }
+        },
+        "required": ["ticker"],
+    },
+)
+
+FINANCE_TOOLS = types.Tool(
+    function_declarations=[GET_STOCK_PRICE_DECLARATION, GET_TECHNICAL_ANALYSIS_DECLARATION]
+)
 
 
 async def _execute_get_stock_price(ticker: str) -> dict:
-    """Wrapper async untuk get_index_data() — dijalankan via asyncio.to_thread() agar tidak memblokir event loop bot."""
     logger.info(f"Menjalankan get_stock_price(ticker={ticker!r})...")
     data = await asyncio.to_thread(get_index_data, ticker)
-
     if data is None:
         return {"error": f"Data untuk ticker '{ticker}' tidak ditemukan atau gagal diambil."}
-
     return {
         "ticker": data.ticker,
         "name": data.name,
@@ -408,16 +399,26 @@ async def _execute_get_stock_price(ticker: str) -> dict:
     }
 
 
+async def _execute_get_technical_analysis(ticker: str) -> dict:
+    logger.info(f"Menjalankan get_technical_analysis(ticker={ticker!r})...")
+    result = await asyncio.to_thread(get_technical_analysis, ticker)
+    if result is None:
+        return {"error": f"Data historis untuk '{ticker}' tidak cukup/gagal diambil untuk analisis teknikal."}
+    return asdict(result)
+
+
 async def _call_tool(function_name: str, function_args: dict) -> dict:
     """Dispatcher: memetakan nama fungsi yang diminta Gemini ke implementasinya."""
     if function_name == "get_stock_price":
         return await _execute_get_stock_price(**function_args)
+    if function_name == "get_technical_analysis":
+        return await _execute_get_technical_analysis(**function_args)
     logger.warning(f"Gemini meminta fungsi yang tidak dikenali: {function_name}")
     return {"error": f"Fungsi '{function_name}' tidak dikenali oleh sistem."}
 
 
 # ============================================================
-# AI CALLER: pemanggilan Gemini (terpisah dari handler Telegram)
+# AI CALLER
 # ============================================================
 
 async def get_gemini_response(
@@ -426,16 +427,17 @@ async def get_gemini_response(
     history: List[types.Content],
     model_manager: ModelManager,
     preferred_model: str,
+    media_parts: Optional[List[types.Part]] = None,
 ) -> str:
     """
-    Mengirim pesan user + riwayat ke Gemini, dengan tool real-time DAN
-    model switching otomatis. Dimulai dari preferred_model (pilihan user
-    via /model); jika model itu (atau model fallback berikutnya) kena
-    429, otomatis lanjut ke model berikutnya di AVAILABLE_MODELS —
-    TANPA mengubah preferensi tersimpan user (fallback ini hanya berlaku
-    untuk satu kali exchange ini).
+    Mengirim pesan user (+ opsional media gambar/dokumen) & riwayat ke
+    Gemini, dengan tool real-time dan model switching otomatis.
     """
-    user_content = types.Content(role="user", parts=[types.Part(text=user_message)])
+    user_parts: List[types.Part] = [types.Part(text=user_message)]
+    if media_parts:
+        user_parts.extend(media_parts)
+
+    user_content = types.Content(role="user", parts=user_parts)
     base_contents: List[types.Content] = history + [user_content]
 
     config = types.GenerateContentConfig(
@@ -443,7 +445,7 @@ async def get_gemini_response(
         temperature=0.4,
         max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
         thinking_config=types.ThinkingConfig(thinking_budget=0),
-        tools=[MARKET_DATA_TOOL],
+        tools=[FINANCE_TOOLS],
     )
 
     current_model = model_manager.get_active_model(preferred=preferred_model)
@@ -493,20 +495,16 @@ async def get_gemini_response(
 
         except genai_errors.APIError as exc:
             is_rate_limited = getattr(exc, "code", None) == 429
-
             if is_rate_limited:
                 model_manager.mark_rate_limited(current_model)
                 next_model = model_manager.get_next_fallback(current_model)
-
                 if next_model and next_model not in models_tried:
                     logger.warning(f"'{current_model}' kena rate limit, beralih ke '{next_model}'...")
                     current_model = next_model
                     continue
-
                 raise GeminiChatError(
                     f"Seluruh model dalam fallback chain terkena rate limit ({', '.join(models_tried)})."
                 ) from exc
-
             logger.error(f"Gemini API error ({current_model}): {exc}")
             raise GeminiChatError(f"Gemini API error: {exc}") from exc
 
@@ -518,21 +516,23 @@ async def get_gemini_response(
 
 
 # ============================================================
-# TELEGRAM HANDLERS
+# TELEGRAM HANDLERS — Teks
 # ============================================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_message = (
         "👋 Halo! Saya <b>AI Finance Assistant</b> Anda.\n\n"
-        "Saya bisa mengambil harga saham/indeks <b>real-time</b>, mengingat "
-        "konteks obrolan, dan Anda bisa memilih model Gemini sendiri.\n\n"
+        "Saya bisa:\n"
+        "• Ambil harga & analisis teknikal <b>real-time</b> (SMA/RSI/MACD)\n"
+        "• Menganalisis <b>screenshot chart</b> yang Anda kirim\n"
+        "• Menganalisis <b>PDF laporan keuangan</b> yang Anda kirim\n"
+        "• Mengingat konteks obrolan kita\n\n"
         "Perintah tersedia:\n"
         "• /model — pilih model Gemini yang dipakai\n"
         "• /reset — hapus riwayat percakapan\n"
         "• /model_status — lihat status rate-limit tiap model\n\n"
-        "Contoh pertanyaan:\n"
-        "• <i>Berapa harga BBCA sekarang?</i>\n"
-        "• <i>Apa dampak The Fed naikkan suku bunga?</i>"
+        "Contoh: kirim <i>screenshot chart BBCA</i>, atau ketik "
+        "<i>\"analisis teknikal TLKM\"</i>."
     )
     await _reply_safe(update, welcome_message)
     logger.info(f"User {update.effective_user.id} memulai sesi via /start.")
@@ -547,18 +547,9 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handler /model — menampilkan 8 pilihan model Gemini sebagai
-    INLINE KEYBOARD (tombol interaktif). Klik tombol ditangani oleh
-    model_button_callback() via CallbackQueryHandler di bawah.
-    """
     preference_store: UserModelPreferenceStore = context.bot_data["preference_store"]
     current_model = preference_store.get(update.effective_user.id)
 
-    # --- Penyusunan Inline Keyboard: 2 kolom x 4 baris ---
-    # Setiap tombol membawa callback_data unik "set_model:<id>" agar
-    # handler bisa tahu persis model mana yang diklik. Model yang
-    # sedang aktif untuk user ini ditandai ✅ di labelnya.
     keyboard_rows = []
     for i in range(0, len(AVAILABLE_MODELS), 2):
         row = []
@@ -579,12 +570,6 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def model_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handler CALLBACK QUERY — menangkap klik tombol dari /model.
-    Alur: validasi data tombol -> update UserModelPreferenceStore ->
-    kirim notifikasi pop-up (answerCallbackQuery) -> edit pesan asal
-    menjadi konfirmasi teks.
-    """
     query = update.callback_query
     user_id = update.effective_user.id
 
@@ -600,14 +585,10 @@ async def model_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("Model tidak dikenali.", show_alert=True)
             return
 
-        # --- STATE UPDATE: simpan preferensi model baru untuk user ini ---
         preference_store: UserModelPreferenceStore = context.bot_data["preference_store"]
         preference_store.set(user_id, option.id)
 
-        # Pop-up notifikasi kecil di UI Telegram (bukan pesan chat baru)
         await query.answer(f"Model diubah ke {option.label}")
-
-        # Edit pesan asal (yang berisi tombol) menjadi teks konfirmasi
         await query.edit_message_text(
             f"✅ Model berhasil diubah menjadi: <b>{option.label}</b>\n<code>{option.id}</code>",
             parse_mode=ParseMode.HTML,
@@ -630,7 +611,6 @@ async def model_status_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler utama untuk pesan teks — memori, data real-time, dan model sesuai preferensi user."""
     user_message = update.message.text
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -658,15 +638,147 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     except GeminiChatError as exc:
         logger.error(f"Gagal mendapatkan respons Gemini untuk user {user_id}: {exc}")
         await update.message.reply_text(
-            "⚠️ Maaf, sistem analisis AI sedang sibuk atau mengalami gangguan "
-            "sementara. Coba lagi sebentar, atau ketik /model untuk mencoba "
-            "model lain, atau /model_status untuk cek kondisinya."
+            "⚠️ Maaf, sistem analisis AI sedang sibuk atau mengalami gangguan. "
+            "Coba lagi sebentar, atau ketik /model untuk mencoba model lain."
         )
     except Exception as exc:
         logger.critical(f"Error tak terduga di handle_text_message (user {user_id}): {exc}")
-        await update.message.reply_text(
-            "⚠️ Terjadi kesalahan tak terduga di sistem kami. Tim teknis akan segera memeriksanya."
+        await update.message.reply_text("⚠️ Terjadi kesalahan tak terduga. Tim teknis akan segera memeriksanya.")
+
+
+# ============================================================
+# TELEGRAM HANDLERS — Media (Gambar & Dokumen)
+# ============================================================
+
+async def _process_media_and_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    media_part: types.Part,
+    caption_text: str,
+) -> None:
+    """
+    Logika BERSAMA untuk memproses pesan bermedia (foto/dokumen): panggil
+    Gemini dengan media + teks, simpan RINGKASAN TEKS ke riwayat (media
+    mentah TIDAK disimpan agar ChatHistoryManager tetap ringan), lalu
+    kirim balasan. Dipisah dari handler agar tidak duplikasi logika
+    antara handle_photo_message dan handle_document_message (DRY).
+    """
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    gemini_client: genai.Client = context.bot_data["gemini_client"]
+    history_manager: ChatHistoryManager = context.bot_data["history_manager"]
+    model_manager: ModelManager = context.bot_data["model_manager"]
+    preference_store: UserModelPreferenceStore = context.bot_data["preference_store"]
+
+    try:
+        history = history_manager.get_history(chat_id)
+        preferred_model = preference_store.get(user_id)
+
+        reply_text = await get_gemini_response(
+            caption_text,
+            gemini_client,
+            history,
+            model_manager,
+            preferred_model,
+            media_parts=[media_part],
         )
+
+        history_manager.add_exchange(chat_id, f"[Mengirim file/gambar] {caption_text}", reply_text)
+        await _reply_safe(update, reply_text + DISCLAIMER_FOOTER)
+        logger.info(f"Analisis media berhasil dikirim ke user {user_id}.")
+
+    except GeminiChatError as exc:
+        logger.error(f"Gagal menganalisis media untuk user {user_id}: {exc}")
+        await update.message.reply_text(
+            "⚠️ Maaf, sistem gagal menganalisis file ini (mungkin sedang sibuk). Coba lagi sebentar."
+        )
+    except Exception as exc:
+        logger.critical(f"Error tak terduga saat memproses media (user {user_id}): {exc}")
+        await update.message.reply_text("⚠️ Terjadi kesalahan tak terduga saat memproses file.")
+
+
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler untuk PESAN BERISI FOTO (misal screenshot chart candlestick)."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    try:
+        # Ambil resolusi TERTINGGI yang tersedia (elemen terakhir di list photo)
+        photo = update.message.photo[-1]
+
+        if photo.file_size and photo.file_size > MAX_MEDIA_FILE_BYTES:
+            await update.message.reply_text("⚠️ Ukuran gambar terlalu besar (maks 15MB).")
+            return
+
+        telegram_file = await context.bot.get_file(photo.file_id)
+        file_bytes = bytes(await telegram_file.download_as_bytearray())
+
+        caption = update.message.caption or (
+            "Tolong analisis chart/gambar ini dari sudut pandang teknikal. "
+            "Jika ada nama saham/ticker yang terlihat atau disebutkan, sertakan analisisnya."
+        )
+
+        logger.info(f"Menerima foto dari user {user_id} ({len(file_bytes)} bytes).")
+
+        await _process_media_and_reply(
+            update=update,
+            context=context,
+            media_part=types.Part.from_bytes(data=file_bytes, mime_type="image/jpeg"),
+            caption_text=caption,
+        )
+
+    except Exception as exc:
+        logger.error(f"Gagal memproses foto dari user {user_id}: {exc}")
+        await update.message.reply_text("⚠️ Gagal memproses gambar. Silakan coba lagi.")
+
+
+async def handle_document_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler untuk PESAN BERISI DOKUMEN (PDF laporan keuangan, atau gambar dikirim sebagai file)."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    document = update.message.document
+
+    if document.mime_type not in ALLOWED_DOCUMENT_MIME_TYPES:
+        await update.message.reply_text(
+            "⚠️ Format file belum didukung. Saat ini hanya PDF, PNG, JPEG, dan WEBP."
+        )
+        return
+
+    if document.file_size and document.file_size > MAX_MEDIA_FILE_BYTES:
+        await update.message.reply_text("⚠️ Ukuran file terlalu besar (maks 15MB).")
+        return
+
+    await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    try:
+        telegram_file = await context.bot.get_file(document.file_id)
+        file_bytes = bytes(await telegram_file.download_as_bytearray())
+
+        is_pdf = document.mime_type == "application/pdf"
+        default_prompt = (
+            "Tolong lakukan analisis fundamental dari laporan/dokumen ini. "
+            "Ekstrak metrik keuangan penting (pendapatan, laba bersih, margin, "
+            "rasio utang, pertumbuhan) jika tersedia di dokumen."
+            if is_pdf else
+            "Tolong analisis chart/gambar ini dari sudut pandang teknikal."
+        )
+        caption = update.message.caption or default_prompt
+
+        logger.info(f"Menerima dokumen ({document.mime_type}) dari user {user_id} ({len(file_bytes)} bytes).")
+
+        await _process_media_and_reply(
+            update=update,
+            context=context,
+            media_part=types.Part.from_bytes(data=file_bytes, mime_type=document.mime_type),
+            caption_text=caption,
+        )
+
+    except Exception as exc:
+        logger.error(f"Gagal memproses dokumen dari user {user_id}: {exc}")
+        await update.message.reply_text("⚠️ Gagal memproses dokumen. Silakan coba lagi.")
 
 
 async def global_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -686,7 +798,6 @@ def main() -> None:
 
     application = ApplicationBuilder().token(Config.TELEGRAM_BOT_TOKEN).build()
 
-    # --- Inisialisasi seluruh state management di bot_data ---
     application.bot_data["gemini_client"] = gemini_client
     application.bot_data["history_manager"] = ChatHistoryManager(max_turns=MAX_HISTORY_TURNS)
     application.bot_data["model_manager"] = ModelManager(AVAILABLE_MODELS)
@@ -696,14 +807,17 @@ def main() -> None:
     application.add_handler(CommandHandler("reset", reset_command))
     application.add_handler(CommandHandler("model", model_command))
     application.add_handler(CommandHandler("model_status", model_status_command))
-    # Pattern regex membatasi handler ini HANYA menangkap callback dari
-    # tombol /model kita (callback_data diawali "set_model:") — mencegah
-    # bentrok jika suatu saat ada CallbackQueryHandler lain di masa depan.
     application.add_handler(CallbackQueryHandler(model_button_callback, pattern="^set_model:"))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document_message))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler_error_handler = None  # no-op, dihapus jika ada versi lama
     application.add_error_handler(global_error_handler)
 
-    logger.info(f"Bot mulai berjalan. {len(AVAILABLE_MODELS)} model tersedia via /model.")
+    logger.info(
+        f"Bot mulai berjalan. {len(AVAILABLE_MODELS)} model, "
+        f"tools: get_stock_price, get_technical_analysis, media analysis aktif."
+    )
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
